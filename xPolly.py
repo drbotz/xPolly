@@ -1,3 +1,5 @@
+# xPolly 6/9/2025 - Bedny Lab (Modified to organize output in a subfolder)
+
 import os
 import sys
 import boto3
@@ -57,7 +59,7 @@ def get_user_config():
     fragment_only_var = tk.IntVar()
     sentences_per_page_var = tk.StringVar(value="10")
     sheet_var = tk.StringVar()
-    
+
     ttk.Label(root, text="Select Voice:").pack(pady=5)
     ttk.Combobox(root, textvariable=voice_var, values=["Joanna", "Matthew", "Ivy", "Justin", "Kendra"], state="readonly").pack()
 
@@ -103,13 +105,22 @@ file_path = user_config['file_path']
 
 if file_path.endswith(".csv"):
     df = pd.read_csv(file_path)
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    folder_prefix = base_name
 elif file_path.endswith(".xlsx"):
     if user_config.get("sheet"):
         df = pd.read_excel(file_path, sheet_name=user_config["sheet"])
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        folder_prefix = f"{user_config['sheet']}-{base_name}"
     else:
         df = pd.read_excel(file_path)
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        folder_prefix = base_name
 else:
     sys.exit("❌ Unsupported file type.")
+
+output_root = os.path.join(script_dir, folder_prefix)
+os.makedirs(output_root, exist_ok=True)
 
 segment_columns = [col for col in df.columns if str(col).lower().startswith("seg")]
 polly = boto3.client("polly", region_name="us-east-1")
@@ -123,7 +134,7 @@ if user_config.get('limit_rows') and user_config.get('max_rows'):
 for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit="row"):
     try:
         folder_name = str(row_index + 1)
-        folder_path = os.path.join(script_dir, folder_name)
+        folder_path = os.path.join(output_root, folder_name)
 
         if os.path.exists(folder_path) and any(fname.endswith(f".{user_config['format']}") for fname in os.listdir(folder_path)):
             fragments = []
