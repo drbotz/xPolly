@@ -1,4 +1,4 @@
-# xPolly_enhanced.py
+# xPolly v9 6/9/2025
 import os
 import sys
 import boto3
@@ -24,6 +24,7 @@ def get_user_config():
         config['limit_rows'] = bool(limit_var.get())
         config['max_rows'] = int(max_rows_var.get()) if config['limit_rows'] else None
         config['fragment_only'] = bool(fragment_only_var.get())
+        config['sentences_per_page'] = int(sentences_per_page_var.get())
         root.destroy()
 
     def cancel():
@@ -34,12 +35,9 @@ def get_user_config():
         filename = filedialog.askopenfilename(filetypes=[("Excel or CSV files", "*.xlsx *.csv")])
         file_path_var.set(filename)
 
-    def drop_file(event):
-        file_path_var.set(event.data.strip())
-
     root = tk.Tk()
     root.title("Polly Voice Synthesizer")
-    root.geometry("450x500")
+    root.geometry("450x550")
 
     voice_var = tk.StringVar(value="Joanna")
     format_var = tk.StringVar(value="mp3")
@@ -48,6 +46,7 @@ def get_user_config():
     limit_var = tk.IntVar()
     max_rows_var = tk.StringVar(value="5")
     fragment_only_var = tk.IntVar()
+    sentences_per_page_var = tk.StringVar(value="10")
 
     ttk.Label(root, text="Select Voice:").pack(pady=5)
     ttk.Combobox(root, textvariable=voice_var, values=["Joanna", "Matthew", "Ivy", "Justin", "Kendra"], state="readonly").pack()
@@ -70,6 +69,9 @@ def get_user_config():
     ttk.Entry(root, textvariable=max_rows_var, width=10).pack()
 
     ttk.Checkbutton(root, text="Fragment Only Mode", variable=fragment_only_var).pack(pady=5)
+
+    ttk.Label(root, text="Sentences per Page (Pause Editor):").pack(pady=5)
+    ttk.Entry(root, textvariable=sentences_per_page_var, width=10).pack()
 
     frame = ttk.Frame(root)
     frame.pack(pady=10)
@@ -103,24 +105,35 @@ if user_config.get('limit_rows') and user_config.get('max_rows'):
 
 for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit="row"):
     try:
-        full_sentence = str(row.iloc[8]) if pd.notna(row.iloc[8]) else ""
-        fragments = [str(row[col]).strip() for col in segment_columns if isinstance(row[col], str) and row[col].strip() and row[col].strip().upper() != "PAUSE"]
-
         folder_name = str(row_index + 1)
         folder_path = os.path.join(script_dir, folder_name)
-        os.makedirs(folder_path, exist_ok=True)
 
-        audio_fragments = []
-        for i, frag in enumerate(fragments):
+        if os.path.exists(folder_path) and any(fname.endswith(f".{user_config['format']}") for fname in os.listdir(folder_path)):
+            fragments = []
+            for fname in sorted(os.listdir(folder_path)):
+                if fname.startswith("_") or not fname.endswith(user_config['format']):
+                    continue
+                frag_path = os.path.join(folder_path, fname)
+                fragments.append((frag_path, os.path.splitext(fname)[0]))
+            if fragments:
+                audio_data.append((row_index + 1, folder_path, fragments))
+                continue
+
+        full_sentence = str(row.iloc[8]) if pd.notna(row.iloc[8]) else ""
+        segments = [str(row[col]).strip() for col in segment_columns if isinstance(row[col], str) and row[col].strip() and row[col].strip().upper() != "PAUSE"]
+
+        os.makedirs(folder_path, exist_ok=True)
+        fragments = []
+        for i, frag in enumerate(segments):
             response = polly.synthesize_speech(Text=frag, OutputFormat=user_config['format'], VoiceId=user_config['voice'])
-            clean_text = re.sub(r'[\\/:*?\"<>|]', '', frag.replace(' ', '_'))[:30]
+            clean_text = re.sub(r'[\\/:*?"<>|]', '', frag.replace(' ', '_'))[:30]
             frag_filename = f"{i+1}_frag_{clean_text}.{user_config['format']}"
             frag_path = os.path.join(folder_path, frag_filename)
             with open(frag_path, "wb") as f:
                 f.write(response["AudioStream"].read())
-            audio_fragments.append((frag_path, frag))
+            fragments.append((frag_path, frag))
 
-        audio_data.append((row_index + 1, folder_path, audio_fragments))
+        audio_data.append((row_index + 1, folder_path, fragments))
 
     except Exception as e:
         print(f"   ⚠️ Error in row {row_index+1}: {e}")
@@ -128,11 +141,47 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
 print("\nFragment generation complete.")
 if not user_config.get("fragment_only"):
     def build_pause_selector():
+        pause_ms = user_config['pause_duration']
+        per_page = user_config.get('sentences_per_page', 10)
+        total = len(audio_data)
+        pages = (total + per_page - 1) // per_page
+        current_page = {'index': 0}
+
+        pause_root = tk.Tk()
+        pause_root.title("Select Pause Placement")
+        container = ttk.Frame(pause_root)
+        container.pack(padx=10, pady=10)
+
+        pause_vars = {}
+
+        def render_page():
+            for widget in container.winfo_children():
+                widget.destroy()
+
+            start = current_page['index'] * per_page
+            end = min(start + per_page, total)
+            for idx, _, fragments in audio_data[start:end]:
+                ttk.Label(container, text=f"Sentence #{idx}").pack()
+                opts = ["No Pause"] + [f"{fragments[i][1]} -> {fragments[i+1][1]}" for i in range(len(fragments)-1)]
+                var = pause_vars.setdefault(idx, tk.StringVar(value="No Pause"))
+                ttk.Combobox(container, textvariable=var, values=opts, state="readonly").pack()
+
+            nav_frame = ttk.Frame(container)
+            nav_frame.pack(pady=10)
+            if current_page['index'] > 0:
+                ttk.Button(nav_frame, text="Previous", command=lambda: change_page(-1)).pack(side="left", padx=5)
+            if current_page['index'] < pages - 1:
+                ttk.Button(nav_frame, text="Next", command=lambda: change_page(1)).pack(side="left", padx=5)
+            ttk.Button(nav_frame, text="Generate Master Files", command=save_and_build_audio).pack(side="left", padx=5)
+
+        def change_page(direction):
+            current_page['index'] += direction
+            render_page()
+
         def save_and_build_audio():
-            pause_ms = user_config['pause_duration']
             silence = AudioSegment.silent(duration=pause_ms)
             for idx, folder_path, fragments in audio_data:
-                choice = pause_vars.get(idx).get()
+                choice = pause_vars.get(idx, tk.StringVar(value="No Pause")).get()
                 combined = AudioSegment.empty()
                 for i, (frag_path, _) in enumerate(fragments):
                     combined += AudioSegment.from_file(frag_path)
@@ -142,21 +191,9 @@ if not user_config.get("fragment_only"):
                 master_path = os.path.join(folder_path, f"master.{user_config['format']}")
                 combined.export(master_path, format=user_config['format'])
                 print(f"✅ Row {idx}: Saved {master_path}")
+            pause_root.destroy()
 
-        pause_root = tk.Tk()
-        pause_root.title("Select Pause Placement")
-        frame = ttk.Frame(pause_root)
-        frame.pack(padx=10, pady=10)
-
-        pause_vars = {}
-        for idx, _, fragments in audio_data:
-            ttk.Label(frame, text=f"Sentence #{idx}").pack()
-            opts = ["No Pause"] + [f"{fragments[i][1]} -> {fragments[i+1][1]}" for i in range(len(fragments)-1)]
-            var = tk.StringVar(value="No Pause")
-            pause_vars[idx] = var
-            ttk.Combobox(frame, textvariable=var, values=opts, state="readonly").pack()
-
-        ttk.Button(frame, text="Generate Master Files", command=save_and_build_audio).pack(pady=10)
+        render_page()
         pause_root.mainloop()
 
     build_pause_selector()
