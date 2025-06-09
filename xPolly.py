@@ -1,4 +1,6 @@
-# xPolly 6/9/2025 - Bedny Lab (Modified to organize output in a subfolder)
+# xPolly 6/9/2025 - Summer Lab
+# v9.2 - finally nesting outputs in a named subfolder
+# fix me - still need to deal with empty rows crashing it
 
 import os
 import sys
@@ -10,13 +12,17 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import re
 
+# import logging
+# logging.basicConfig(level=logging.DEBUG)
+# print(f"Debug debug debug")
+
 def get_user_config():
     config = {}
     cancelled = {'value': False}
 
     def submit():
         if not file_path_var.get():
-            messagebox.showerror("Input Required", "Please select a data file.")
+            messagebox.showerror("Input Required", "pls select a file")
             return
         config['voice'] = voice_var.get()
         config['format'] = format_var.get()
@@ -35,6 +41,7 @@ def get_user_config():
 
     def choose_file():
         filename = filedialog.askopenfilename(filetypes=[("Excel or CSV files", "*.xlsx *.csv")])
+        #print(f"Debug debug debug")
         file_path_var.set(filename)
         if filename.endswith('.xlsx'):
             try:
@@ -44,12 +51,13 @@ def get_user_config():
                 sheet_dropdown.set(xl.sheet_names[0])
                 sheet_dropdown.pack()
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to read Excel file: {e}")
+                messagebox.showerror("Error", f"Excel read fail: {e}")
 
     root = tk.Tk()
     root.title("Polly Voice Synthesizer")
     root.geometry("450x600")
 
+    # UI vars
     voice_var = tk.StringVar(value="Joanna")
     format_var = tk.StringVar(value="mp3")
     pause_var = tk.StringVar(value="500")
@@ -60,6 +68,7 @@ def get_user_config():
     sentences_per_page_var = tk.StringVar(value="10")
     sheet_var = tk.StringVar()
 
+    # GUI stuff
     ttk.Label(root, text="Select Voice:").pack(pady=5)
     ttk.Combobox(root, textvariable=voice_var, values=["Joanna", "Matthew", "Ivy", "Justin", "Kendra"], state="readonly").pack()
 
@@ -70,8 +79,7 @@ def get_user_config():
     ttk.Entry(root, textvariable=pause_var, width=10).pack()
 
     ttk.Label(root, text="Select Stimuli File:").pack(pady=5)
-    entry = ttk.Entry(root, textvariable=file_path_var, width=40)
-    entry.pack()
+    ttk.Entry(root, textvariable=file_path_var, width=40).pack()
     ttk.Button(root, text="Browse", command=choose_file).pack(pady=5)
 
     ttk.Label(root, text="Select Sheet (if Excel):").pack()
@@ -94,15 +102,20 @@ def get_user_config():
     root.mainloop()
 
     if cancelled['value']:
-        sys.exit("❌ Operation cancelled by user.")
+        sys.exit("canceled by op")
 
     return config
 
-# Load file
+# --- Main Execution Starts Here -----------------------
+
 user_config = get_user_config()
 script_dir = os.path.dirname(os.path.abspath(__file__))
 file_path = user_config['file_path']
 
+# this was breaking
+#  add encoding param
+
+# Load data file (add csv???)
 if file_path.endswith(".csv"):
     df = pd.read_csv(file_path)
     base_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -113,30 +126,35 @@ elif file_path.endswith(".xlsx"):
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         folder_prefix = f"{user_config['sheet']}-{base_name}"
     else:
+        #print(f"Debug debug debug")
         df = pd.read_excel(file_path)
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         folder_prefix = base_name
 else:
-    sys.exit("❌ Unsupported file type.")
+    sys.exit("U cant use that file")
 
 output_root = os.path.join(script_dir, folder_prefix)
 os.makedirs(output_root, exist_ok=True)
 
+# segment columns perchance
 segment_columns = [col for col in df.columns if str(col).lower().startswith("seg")]
 polly = boto3.client("polly", region_name="us-east-1")
 
 print(f"Generating fragments for {len(df)} rows...\n")
+
 audio_data = []
 
 if user_config.get('limit_rows') and user_config.get('max_rows'):
     df = df.head(user_config['max_rows'])
 
+# main synth loop
 for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit="row"):
     try:
         folder_name = str(row_index + 1)
         folder_path = os.path.join(output_root, folder_name)
 
         if os.path.exists(folder_path) and any(fname.endswith(f".{user_config['format']}") for fname in os.listdir(folder_path)):
+            # skip rows with files 
             fragments = []
             for fname in sorted(os.listdir(folder_path)):
                 if fname.startswith("_") or not fname.endswith(user_config['format']):
@@ -147,11 +165,14 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
                 audio_data.append((row_index + 1, folder_path, fragments))
                 continue
 
+        # extract clean segment texts
         segments = [str(row[col]).strip() for col in segment_columns if isinstance(row[col], str) and row[col].strip() and row[col].strip().upper() != "PAUSE"]
 
         os.makedirs(folder_path, exist_ok=True)
         fragments = []
+
         for i, frag in enumerate(segments):
+            #print(f"[DEBUG] Synth: {frag[:15]}...")
             response = polly.synthesize_speech(Text=frag, OutputFormat=user_config['format'], VoiceId=user_config['voice'])
             clean_text = re.sub(r'[\\/:*?"<>|]', '', frag.replace(' ', '_'))[:30]
             frag_filename = f"{i+1}_frag_{clean_text}.{user_config['format']}"
@@ -163,20 +184,21 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
         audio_data.append((row_index + 1, folder_path, fragments))
 
     except Exception as e:
-        print(f"   ⚠️ Error in row {row_index+1}: {e}")
+        print(f"row {row_index+1} error: {e}")
 
-print("\nFragment generation complete.")
+print("\nfrag gen done.")
 
 if not user_config.get("fragment_only"):
     def build_pause_selector():
         pause_ms = user_config['pause_duration']
+        #print(f"Test Test DID i run correcly")
         per_page = user_config.get('sentences_per_page', 10)
         total = len(audio_data)
         pages = (total + per_page - 1) // per_page
         current_page = {'index': 0}
 
         pause_root = tk.Tk()
-        pause_root.title("Select Pause Placement")
+        pause_root.title("Pause Selector")
         container = ttk.Frame(pause_root)
         container.pack(padx=10, pady=10)
 
@@ -208,6 +230,7 @@ if not user_config.get("fragment_only"):
 
         def save_and_build_audio():
             silence = AudioSegment.silent(duration=pause_ms)
+            #print(f"Debug debug debug")
             for idx, folder_path, fragments in audio_data:
                 choice = pause_vars.get(idx, tk.StringVar(value="No Pause")).get()
                 combined = AudioSegment.empty()
@@ -218,7 +241,7 @@ if not user_config.get("fragment_only"):
                             combined += silence
                 master_path = os.path.join(folder_path, f"master.{user_config['format']}")
                 combined.export(master_path, format=user_config['format'])
-                print(f"✅ Row {idx}: Saved {master_path}")
+                print(f"Row {idx}: saved {master_path}")
             pause_root.destroy()
 
         render_page()
@@ -226,5 +249,5 @@ if not user_config.get("fragment_only"):
 
     build_pause_selector()
 
-print("\n✅ All done. Check folders for output audio.")
+print("\n DONE. go check the output folders.")
 tk.mainloop()
