@@ -1,4 +1,3 @@
-# xPolly v9 6/9/2025
 import os
 import sys
 import boto3
@@ -25,6 +24,7 @@ def get_user_config():
         config['max_rows'] = int(max_rows_var.get()) if config['limit_rows'] else None
         config['fragment_only'] = bool(fragment_only_var.get())
         config['sentences_per_page'] = int(sentences_per_page_var.get())
+        config['sheet'] = sheet_var.get() if file_path_var.get().endswith('.xlsx') else None
         root.destroy()
 
     def cancel():
@@ -34,10 +34,19 @@ def get_user_config():
     def choose_file():
         filename = filedialog.askopenfilename(filetypes=[("Excel or CSV files", "*.xlsx *.csv")])
         file_path_var.set(filename)
+        if filename.endswith('.xlsx'):
+            try:
+                xl = pd.ExcelFile(filename)
+                sheet_var.set(xl.sheet_names[0])
+                sheet_dropdown['values'] = xl.sheet_names
+                sheet_dropdown.set(xl.sheet_names[0])
+                sheet_dropdown.pack()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read Excel file: {e}")
 
     root = tk.Tk()
     root.title("Polly Voice Synthesizer")
-    root.geometry("450x550")
+    root.geometry("450x600")
 
     voice_var = tk.StringVar(value="Joanna")
     format_var = tk.StringVar(value="mp3")
@@ -47,7 +56,8 @@ def get_user_config():
     max_rows_var = tk.StringVar(value="5")
     fragment_only_var = tk.IntVar()
     sentences_per_page_var = tk.StringVar(value="10")
-
+    sheet_var = tk.StringVar()
+    
     ttk.Label(root, text="Select Voice:").pack(pady=5)
     ttk.Combobox(root, textvariable=voice_var, values=["Joanna", "Matthew", "Ivy", "Justin", "Kendra"], state="readonly").pack()
 
@@ -62,14 +72,15 @@ def get_user_config():
     entry.pack()
     ttk.Button(root, text="Browse", command=choose_file).pack(pady=5)
 
-    ttk.Label(root, text="(You can drag & drop file path above if supported)").pack()
+    ttk.Label(root, text="Select Sheet (if Excel):").pack()
+    sheet_dropdown = ttk.Combobox(root, textvariable=sheet_var, state="readonly")
+    sheet_dropdown.pack()
 
     ttk.Checkbutton(root, text="Limiting Mode", variable=limit_var).pack(pady=5)
     ttk.Label(root, text="Max Rows (if limited):").pack(pady=5)
     ttk.Entry(root, textvariable=max_rows_var, width=10).pack()
 
     ttk.Checkbutton(root, text="Fragment Only Mode", variable=fragment_only_var).pack(pady=5)
-
     ttk.Label(root, text="Sentences per Page (Pause Editor):").pack(pady=5)
     ttk.Entry(root, textvariable=sentences_per_page_var, width=10).pack()
 
@@ -85,14 +96,20 @@ def get_user_config():
 
     return config
 
+# Load file
 user_config = get_user_config()
 script_dir = os.path.dirname(os.path.abspath(__file__))
 file_path = user_config['file_path']
 
 if file_path.endswith(".csv"):
     df = pd.read_csv(file_path)
+elif file_path.endswith(".xlsx"):
+    if user_config.get("sheet"):
+        df = pd.read_excel(file_path, sheet_name=user_config["sheet"])
+    else:
+        df = pd.read_excel(file_path)
 else:
-    df = pd.read_excel(file_path)
+    sys.exit("❌ Unsupported file type.")
 
 segment_columns = [col for col in df.columns if str(col).lower().startswith("seg")]
 polly = boto3.client("polly", region_name="us-east-1")
@@ -119,7 +136,6 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
                 audio_data.append((row_index + 1, folder_path, fragments))
                 continue
 
-        full_sentence = str(row.iloc[8]) if pd.notna(row.iloc[8]) else ""
         segments = [str(row[col]).strip() for col in segment_columns if isinstance(row[col], str) and row[col].strip() and row[col].strip().upper() != "PAUSE"]
 
         os.makedirs(folder_path, exist_ok=True)
@@ -139,6 +155,7 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
         print(f"   ⚠️ Error in row {row_index+1}: {e}")
 
 print("\nFragment generation complete.")
+
 if not user_config.get("fragment_only"):
     def build_pause_selector():
         pause_ms = user_config['pause_duration']
