@@ -40,7 +40,7 @@ def get_user_config():
         root.destroy()
 
     def choose_file():
-        filename = filedialog.askopenfilename(filetypes=[("Excel or CSV files", "*.xlsx *.csv")])
+        filename = filedialog.askopenfilename(filetypes=[["Excel or CSV files", "*.xlsx *.csv"]])
         #print(f"Debug debug debug")
         file_path_var.set(filename)
         if filename.endswith('.xlsx'):
@@ -58,7 +58,7 @@ def get_user_config():
     root.geometry("450x600")
 
     # UI vars
-    voice_var = tk.StringVar(value="Joanna")
+    voice_var = tk.StringVar(value="Matthew")
     format_var = tk.StringVar(value="mp3")
     pause_var = tk.StringVar(value="500")
     file_path_var = tk.StringVar()
@@ -162,7 +162,7 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
                 frag_path = os.path.join(folder_path, fname)
                 fragments.append((frag_path, os.path.splitext(fname)[0]))
             if fragments:
-                audio_data.append((row_index + 1, folder_path, fragments))
+                audio_data.append((row_index + 1, folder_path, fragments, df.index[row_index]))
                 continue
 
         # extract clean segment texts
@@ -181,7 +181,7 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
                 f.write(response["AudioStream"].read())
             fragments.append((frag_path, frag))
 
-        audio_data.append((row_index + 1, folder_path, fragments))
+        audio_data.append((row_index + 1, folder_path, fragments, df.index[row_index]))
 
     except Exception as e:
         print(f"row {row_index+1} error: {e}")
@@ -210,10 +210,11 @@ if not user_config.get("fragment_only"):
 
             start = current_page['index'] * per_page
             end = min(start + per_page, total)
-            for idx, _, fragments in audio_data[start:end]:
-                ttk.Label(container, text=f"Sentence #{idx}").pack()
+            for display_idx, _, fragments, excel_row in audio_data[start:end]:
+                label = f"Sentence #{display_idx} (Row {excel_row + 2})"
+                ttk.Label(container, text=label).pack()
                 opts = ["No Pause"] + [f"{fragments[i][1]} -> {fragments[i+1][1]}" for i in range(len(fragments)-1)]
-                var = pause_vars.setdefault(idx, tk.StringVar(value="No Pause"))
+                var = pause_vars.setdefault(display_idx, tk.StringVar(value="No Pause"))
                 ttk.Combobox(container, textvariable=var, values=opts, state="readonly").pack()
 
             nav_frame = ttk.Frame(container)
@@ -231,7 +232,7 @@ if not user_config.get("fragment_only"):
         def save_and_build_audio():
             silence = AudioSegment.silent(duration=pause_ms)
             #print(f"Debug debug debug")
-            for idx, folder_path, fragments in audio_data:
+            for idx, folder_path, fragments, _ in audio_data:
                 choice = pause_vars.get(idx, tk.StringVar(value="No Pause")).get()
                 combined = AudioSegment.empty()
                 for i, (frag_path, _) in enumerate(fragments):
