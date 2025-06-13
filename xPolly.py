@@ -1,17 +1,29 @@
 # xPolly 6/9/2025 - Summer Lab
-# v9.2 - finally nesting outputs in a named subfolder
-# fix me - still need to deal with empty rows crashing it
+# v9.4 - tight silence trimming using split_to_mono, .strip_silence()
 
 import os
 import sys
 import boto3
 import pandas as pd
 from tqdm import tqdm
-from pydub import AudioSegment
+from pydub import AudioSegment, silence
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import re
 import shutil
+import io
+
+
+def strip_silence(audio, silence_thresh=-50, padding=5):
+    """
+    Trims leading and trailing silence very aggressively and optionally adds back a small padding (ms).
+    """
+    non_silent = silence.detect_nonsilent(audio, min_silence_len=40, silence_thresh=silence_thresh)
+    if not non_silent:
+        return audio
+    start = max(0, non_silent[0][0] - padding)
+    end = min(len(audio), non_silent[-1][1] + padding)
+    return audio[start:end]
 
 
 def get_user_config():
@@ -31,10 +43,13 @@ def get_user_config():
         config['fragment_only'] = bool(fragment_only_var.get())
         config['sentences_per_page'] = int(sentences_per_page_var.get())
         config['sheet'] = sheet_var.get() if file_path_var.get().endswith('.xlsx') else None
+        config['trim_silence'] = bool(trim_silence_var.get())
+        root.quit()
         root.destroy()
 
     def cancel():
         cancelled['value'] = True
+        root.quit()
         root.destroy()
 
     def choose_file():
@@ -52,7 +67,7 @@ def get_user_config():
 
     root = tk.Tk()
     root.title("Polly Voice Synthesizer")
-    root.geometry("450x600")
+    root.geometry("450x650")
 
     voice_var = tk.StringVar(value="Matthew")
     format_var = tk.StringVar(value="mp3")
@@ -63,6 +78,7 @@ def get_user_config():
     fragment_only_var = tk.IntVar()
     sentences_per_page_var = tk.StringVar(value="10")
     sheet_var = tk.StringVar()
+    trim_silence_var = tk.IntVar(value=1)
 
     ttk.Label(root, text="Select Voice:").pack(pady=5)
     ttk.Combobox(root, textvariable=voice_var, values=["Joanna", "Matthew", "Ivy", "Justin", "Kendra"], state="readonly").pack()
@@ -89,6 +105,8 @@ def get_user_config():
     ttk.Label(root, text="Sentences per Page (Pause Editor):").pack(pady=5)
     ttk.Entry(root, textvariable=sentences_per_page_var, width=10).pack()
 
+    ttk.Checkbutton(root, text="Trim Silence in Fragments", variable=trim_silence_var).pack(pady=10)
+
     frame = ttk.Frame(root)
     frame.pack(pady=10)
     ttk.Button(frame, text="Start", command=submit).pack(side="left", padx=10)
@@ -100,6 +118,7 @@ def get_user_config():
         sys.exit("canceled by op")
 
     return config
+
 
 user_config = get_user_config()
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -138,20 +157,7 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
     try:
         folder_name = str(row_index + 1)
         folder_path = os.path.join(output_root, folder_name)
-
-        if os.path.exists(folder_path) and any(fname.endswith(f".{user_config['format']}") for fname in os.listdir(folder_path)):
-            fragments = []
-            for fname in sorted(os.listdir(folder_path)):
-                if fname.startswith("_") or not fname.endswith(user_config['format']):
-                    continue
-                frag_path = os.path.join(folder_path, fname)
-                fragments.append((frag_path, os.path.splitext(fname)[0]))
-            if fragments:
-                audio_data.append((row_index + 1, folder_path, fragments, df.index[row_index]))
-                continue
-
         segments = [str(row[col]).strip() for col in segment_columns if isinstance(row[col], str) and row[col].strip() and row[col].strip().upper() != "PAUSE"]
-
         os.makedirs(folder_path, exist_ok=True)
         fragments = []
 
@@ -160,8 +166,12 @@ for row_index, row in tqdm(df.iterrows(), total=len(df), desc="Generating", unit
             clean_text = re.sub(r'[\\/:*?"<>|]', '', frag.replace(' ', '_'))[:30]
             frag_filename = f"{i+1}_frag_{clean_text}.{user_config['format']}"
             frag_path = os.path.join(folder_path, frag_filename)
-            with open(frag_path, "wb") as f:
-                f.write(response["AudioStream"].read())
+
+            raw_audio = AudioSegment.from_file(io.BytesIO(response["AudioStream"].read()), format=user_config['format'])
+            if user_config['trim_silence']:
+                raw_audio = strip_silence(raw_audio, silence_thresh=-48, padding=0)
+
+            raw_audio.export(frag_path, format=user_config['format'])
             fragments.append((frag_path, frag))
 
         audio_data.append((row_index + 1, folder_path, fragments, df.index[row_index]))
@@ -212,7 +222,7 @@ if not user_config.get("fragment_only"):
             render_page()
 
         def save_and_build_audio():
-            silence = AudioSegment.silent(duration=pause_ms)
+            silence_seg = AudioSegment.silent(duration=pause_ms)
             central_master_folder = os.path.join(output_root, "AllMasters")
             os.makedirs(central_master_folder, exist_ok=True)
 
@@ -223,7 +233,7 @@ if not user_config.get("fragment_only"):
                     combined += AudioSegment.from_file(frag_path)
                     if choice != "No Pause" and i + 1 < len(fragments):
                         if choice == f"{fragments[i][1]} -> {fragments[i+1][1]}":
-                            combined += silence
+                            combined += silence_seg
 
                 try:
                     row_id_value = str(df.iloc[row_idx, 7]).strip()
@@ -236,11 +246,10 @@ if not user_config.get("fragment_only"):
                 master_filename = f"{row_id_value}.{user_config['format']}"
                 master_path = os.path.join(folder_path, master_filename)
                 combined.export(master_path, format=user_config['format'])
-
                 print(f"Row {idx}: saved {master_path}")
-
                 shutil.copy(master_path, os.path.join(central_master_folder, master_filename))
 
+            pause_root.quit()
             pause_root.destroy()
 
         render_page()
@@ -249,4 +258,3 @@ if not user_config.get("fragment_only"):
     build_pause_selector()
 
 print("\n DONE. go check the output folders.")
-tk.mainloop()
